@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties, type DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent } from 'react'
 import {
   addEdge,
   applyEdgeChanges,
@@ -88,6 +88,7 @@ function Simulator() {
   const [toast, setToast] = useState('')
   const [filterText, setFilterText] = useState('')
   const [showHelp, setShowHelp] = useState(false)
+  const [agentReviewApproved, setAgentReviewApproved] = useState(false)
   const [showBeginnerGuide, setShowBeginnerGuide] = useState(() => {
     try { return window.localStorage.getItem('simengine-guide-dismissed') !== 'true' } catch { return true }
   })
@@ -95,6 +96,11 @@ function Simulator() {
   const metric = store.currentMetric || starterMetric
   const nodes = store.nodes
   const edges = store.edges
+  const agentGraphRevision = JSON.stringify({
+    nodes: nodes.map((node) => [node.id, node.position.x, node.position.y, node.data.kind, node.data.label, node.data.capacity, node.data.latency]),
+    edges: edges.map((edge) => [edge.id, edge.source, edge.target, edge.data?.protocol]),
+  })
+  const previousAgentGraphRevision = useRef('')
   const selectedNode = nodes.find((node) => node.id === store.selectedNodeId)
   const selectedEdge = edges.find((edge) => edge.id === store.selectedEdgeId)
   const visibleHistory = metricHistory.length ? metricHistory.slice(-18) : Array.from({ length: 12 }, (_, index) => ({ ...starterMetric, second: index * 2, incomingRps: 800 + index * 18, throughput: 760 + index * 16, p95: 88 + index, cpu: 30 + index }))
@@ -117,6 +123,11 @@ function Simulator() {
     }, 280)
     return () => window.clearTimeout(timeout)
   }, [nodes, edges, store.setApiOnline])
+
+  useEffect(() => {
+    if (previousAgentGraphRevision.current && previousAgentGraphRevision.current !== agentGraphRevision) setAgentReviewApproved(false)
+    previousAgentGraphRevision.current = agentGraphRevision
+  }, [agentGraphRevision])
 
   useEffect(() => {
     if (!toast) return
@@ -151,6 +162,11 @@ function Simulator() {
   }, [flow, store])
 
   const handleModule = (id: keyof typeof moduleInfo) => {
+    if (id !== store.activeModule) {
+      store.setSimulationResult(null)
+      store.setPipelineResult(null)
+      setAgentReviewApproved(false)
+    }
     store.setActiveModule(id)
     if (id === 'devops') {
       store.setCanvasTab('pipeline')
@@ -174,6 +190,7 @@ function Simulator() {
 
   const runStressTest = async () => {
     if (store.isRunning) return
+    setAgentReviewApproved(false)
     store.setIsRunning(true)
     store.setSimulationProgress(0)
     store.setSimulationResult(null)
@@ -208,6 +225,10 @@ function Simulator() {
   }
 
   const runPipeline = async () => {
+    if (store.activeModule === 'agents' && !agentReviewApproved) {
+      setToast('Human sign-off is required before the multi-agent release can run.')
+      return
+    }
     if (store.pipelineRunning) return
     store.setPipelineRunning(true)
     store.setPipelineResult(null)
@@ -259,6 +280,18 @@ function Simulator() {
     store.setCanvasTab('architecture')
     store.selectNode(null)
     store.selectEdge(null)
+  }
+
+  const configureConnection = (sourceId: string, targetId: string, protocol: Protocol) => {
+    const edge = useSimulatorStore.getState().edges.find((item) => item.source === sourceId && item.target === targetId)
+    if (!edge) {
+      setToast(`Connect ${sourceId} to ${targetId} first, then configure its protocol.`)
+      return false
+    }
+    store.setCanvasTab('architecture')
+    store.updateEdgeProtocol(edge.id, protocol)
+    store.selectEdge(edge.id)
+    return true
   }
 
   const focusNode = (kind: NodeKind) => {
@@ -354,6 +387,7 @@ function Simulator() {
             auditReady={auditReady}
             audit={audit}
             nodes={nodes}
+            edges={edges}
             simulationResult={store.simulationResult}
             pipelineResult={store.pipelineResult}
             onDismiss={dismissBeginnerGuide}
@@ -363,6 +397,9 @@ function Simulator() {
             onAddNode={addCanvasNode}
             onRunStressTest={runStressTest}
             onRunPipeline={runPipeline}
+            onConfigureConnection={configureConnection}
+            agentReviewApproved={agentReviewApproved}
+            onApproveAgentReview={() => setAgentReviewApproved(true)}
           />
 
           <section className="workbench-section">
@@ -373,7 +410,7 @@ function Simulator() {
                   <button role="tab" aria-selected={!isPipelineView} className={!isPipelineView ? 'selected' : ''} onClick={() => store.setCanvasTab('architecture')}><Boxes size={14} /> Architecture</button>
                   <button role="tab" aria-selected={isPipelineView} className={isPipelineView ? 'selected' : ''} onClick={() => { store.setCanvasTab('pipeline'); const pipelineNode = nodes.find((node) => node.data.kind === 'pipeline'); if (pipelineNode) store.selectNode(pipelineNode.id); else addCanvasNode('pipeline') }}><GitBranch size={14} /> CI/CD pipeline <span className="tab-new-dot" /></button>
                 </div>
-                <button className="reset-button" onClick={() => { store.reset(); setAudit({ antiPatterns: [] }); setMetricHistory([]); setToast('Architecture reset to the incident baseline') }}><RotateCcw size={14} /><span>Reset</span></button>
+                <button className="reset-button" onClick={() => { store.reset(); setAgentReviewApproved(false); setAudit({ antiPatterns: [] }); setMetricHistory([]); setToast('Architecture reset to the incident baseline') }}><RotateCcw size={14} /><span>Reset</span></button>
                 <button className={`run-button${store.isRunning ? ' running' : ''}`} onClick={isPipelineView ? runPipeline : runStressTest} disabled={store.isRunning || store.pipelineRunning}>
                   {store.isRunning || store.pipelineRunning ? <span className="button-spinner" /> : isPipelineView ? <GitBranch size={15} /> : <Play size={14} fill="currentColor" />}
                   {store.isRunning ? 'Running test…' : store.pipelineRunning ? 'Executing…' : isPipelineView ? 'Trigger Git push' : 'Run stress test'}
@@ -433,8 +470,10 @@ type BeginnerGuideProps = {
   auditReady: boolean
   audit: { antiPatterns: AntiPattern[] }
   nodes: DiagramNode[]
+  edges: DiagramEdge[]
   simulationResult: SimulationResult | null
   pipelineResult: PipelineResult | null
+  agentReviewApproved: boolean
   onDismiss: () => void
   onHelp: () => void
   onOpenAudit: () => void
@@ -442,14 +481,27 @@ type BeginnerGuideProps = {
   onAddNode: (kind: NodeKind) => void
   onRunStressTest: () => void
   onRunPipeline: () => void
+  onConfigureConnection: (sourceId: string, targetId: string, protocol: Protocol) => boolean
+  onApproveAgentReview: () => void
 }
 
-function BeginnerGuide({ visible, moduleId, auditReady, audit, nodes, simulationResult, pipelineResult, onDismiss, onHelp, onOpenAudit, onFocusNode, onAddNode, onRunStressTest, onRunPipeline }: BeginnerGuideProps) {
+function BeginnerGuide({ visible, moduleId, auditReady, audit, nodes, edges, simulationResult, pipelineResult, agentReviewApproved, onDismiss, onHelp, onOpenAudit, onFocusNode, onAddNode, onRunStressTest, onRunPipeline, onConfigureConnection, onApproveAgentReview }: BeginnerGuideProps) {
   const store = useSimulatorStore()
   const [briefReviewed, setBriefReviewed] = useState(false)
+  const [inventoryPathReviewed, setInventoryPathReviewed] = useState(false)
+  const [dataFlowReviewed, setDataFlowReviewed] = useState(false)
+  const [advisorReviewed, setAdvisorReviewed] = useState(false)
+  useEffect(() => {
+    setBriefReviewed(false)
+    setInventoryPathReviewed(false)
+    setDataFlowReviewed(false)
+    setAdvisorReviewed(false)
+  }, [moduleId])
   if (!visible) return null
 
   const pipelineMode = moduleId === 'devops'
+  const dataMode = moduleId === 'data'
+  const agentMode = moduleId === 'agents'
   const databaseIssue = audit.antiPatterns.some((item) => item.id === 'shared-database' || item.id === 'missing-persistence')
   const cacheIssue = audit.antiPatterns.some((item) => item.id === 'uncached-reads')
   const databaseCount = nodes.filter((node) => node.data.kind === 'database').length
@@ -460,14 +512,32 @@ function BeginnerGuide({ visible, moduleId, auditReady, audit, nodes, simulation
   const rollbackReady = store.pipelineStrategy === 'canary' && store.rollbackEnabled && store.rollbackThreshold <= 2
   const databaseReady = auditReady && !databaseIssue
   const cacheReady = auditReady && !cacheIssue
+  const inventoryWriteEdge = edges.find((edge) => edge.source === 'checkout' && edge.target === 'inventory')
+  const inventoryPathReady = inventoryWriteEdge?.data?.protocol === 'gRPC' && inventoryPathReviewed
+  const brokerNode = nodes.find((node) => node.data.kind === 'broker')
+  const inventoryEventEdge = brokerNode ? edges.find((edge) => edge.source === 'inventory' && edge.target === brokerNode.id) : undefined
+  const inventoryEventsReady = inventoryEventEdge?.data?.protocol === 'AMQP'
+  const dataFlowReady = inventoryPathReady && inventoryEventsReady
+  const safePipelineResult = Boolean(pipelineResult && ['protected', 'recovered'].includes(pipelineResult.outcome))
 
-  const steps = pipelineMode ? [
+  type Step = { done: boolean; title: string; description: string; action: string; onAction: () => void; disabled?: boolean }
+  const steps: Step[] = pipelineMode ? [
     { done: testGateReady, title: 'Make tests a blocking gate', description: 'Keep “Unit & integration tests” enabled and Blocking. This catches the simulated memory leak before a deploy starts.', action: testGateReady ? 'Review test gate' : 'Set blocking tests', onAction: () => { store.setCanvasTab('pipeline'); store.setPipelineStages((stages) => stages.map((stage) => stage.id === 'tests' ? { ...stage, enabled: true, blocking: true } : stage)) } },
     { done: rollbackReady, title: 'Protect the rollout', description: 'Choose Canary, send a small traffic share, and enable auto rollback at 2% error rate.', action: rollbackReady ? 'Review rollout settings' : 'Use safe canary settings', onAction: () => { store.setCanvasTab('pipeline'); store.setPipelineOptions({ pipelineStrategy: 'canary', canaryTraffic: 10, rollbackEnabled: true, rollbackThreshold: 2 }) } },
     { done: Boolean(pipelineResult && ['protected', 'recovered'].includes(pipelineResult.outcome)), title: 'Send the buggy change', description: 'Trigger the simulated Git push. Watch whether tests block it or canary monitoring rolls it back.', action: pipelineResult ? 'Run push again' : 'Trigger Git push', onAction: onRunPipeline },
     { done: Boolean(pipelineResult && ['protected', 'recovered'].includes(pipelineResult.outcome)), title: 'Read the release result', description: pipelineResult ? pipelineResult.message : 'A safe result says “Regression blocked” or “Automated recovery.” Production should remain untouched.', action: pipelineResult ? 'View pipeline logs' : 'Open pipeline view', onAction: () => store.setCanvasTab('pipeline') },
   ]
-    : [
+    : dataMode ? [
+      { done: inventoryPathReady, title: 'Protect the inventory reservation write', description: inventoryPathReady ? 'Checkout waits for the authoritative Inventory service over gRPC before confirming a reservation.' : inventoryWriteEdge ? 'Reservations need an immediate authoritative answer. Configure Checkout → Inventory as synchronous gRPC; do not put this write behind a queue.' : 'Reconnect Checkout → Inventory first. Stock reservations must be confirmed by the authoritative Inventory service.', action: inventoryPathReady ? 'Review reservation path' : inventoryWriteEdge?.data?.protocol === 'gRPC' ? 'Confirm gRPC path' : 'Set path to gRPC', onAction: () => { if (onConfigureConnection('checkout', 'inventory', 'gRPC')) setInventoryPathReviewed(true) } },
+      { done: inventoryEventsReady, title: 'Publish inventory changes asynchronously', description: inventoryEventsReady ? 'Inventory publishes downstream updates over AMQP while the reservation itself stays synchronous.' : brokerNode ? 'Connect Inventory → Broker, select that edge, and set its protocol to AMQP. Keep the Checkout → Inventory reservation path synchronous.' : 'Add an event broker, then connect Inventory → Broker and set the connection type to AMQP. Use the queue for updates, not reservation approval.', action: brokerNode ? 'Select event broker' : 'Add event broker', onAction: () => brokerNode ? onFocusNode('broker') : onAddNode('broker') },
+      { done: Boolean(dataFlowReviewed && dataFlowReady), title: 'Review the two data lanes', description: 'Confirm the distinction: gRPC is the authoritative stock reservation; AMQP carries downstream inventory-change events. This avoids treating delayed events as proof of available stock.', action: dataFlowReviewed ? 'Review data paths again' : 'Confirm data-flow review', disabled: !dataFlowReady, onAction: () => { setDataFlowReviewed(true); onFocusNode('broker') } },
+      { done: Boolean(simulationResult), title: 'Run a capacity check', description: simulationResult ? `${simulationResult.summary} Note: this stress test checks load and latency; it does not simulate a regional partition or prove consistency.` : 'Run the traffic ramp and inspect latency and errors. This simulator does not model regional partitions, so treat this as a capacity check—not proof of zero overselling.', action: simulationResult ? 'Run capacity check again' : 'Run stress test', onAction: onRunStressTest },
+    ] : agentMode ? [
+      { done: Boolean(simulationResult), title: 'Generate a review packet', description: simulationResult ? 'A local 4D topology review and stress-test result are ready.' : 'Run the scenario to generate a deterministic review across decomposition, resilience, data & scale, and delivery.', action: simulationResult ? 'Regenerate review packet' : 'Run stress test', onAction: onRunStressTest },
+      { done: advisorReviewed, title: 'Review the four dimensions', description: 'Read each finding and decide whether the design is safe to proceed. This is an offline heuristic review—not an external AI agent.', action: advisorReviewed ? 'Open 4D review again' : 'Open 4D review', disabled: !simulationResult, onAction: () => { document.querySelector('.four-d-review')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); setAdvisorReviewed(true) } },
+      { done: agentReviewApproved, title: 'Record human sign-off', description: agentReviewApproved ? 'A human has accepted responsibility for this review. Changing modules or rerunning the test clears this approval.' : 'After reading the four dimensions, explicitly approve the current review. The release action stays blocked until you do.', action: agentReviewApproved ? 'Approval recorded' : 'Approve reviewed design', disabled: !advisorReviewed, onAction: onApproveAgentReview },
+      { done: safePipelineResult, title: 'Run the guarded release', description: pipelineResult ? pipelineResult.message : 'Trigger the simulated release only after sign-off. A safe outcome blocks the regression or automatically recovers without production impact.', action: pipelineResult ? 'Run release again' : 'Open pipeline and run', disabled: !agentReviewApproved, onAction: () => { store.setCanvasTab('pipeline'); onRunPipeline() } },
+    ] : [
       { done: briefReviewed, title: 'Start with the system audit', description: 'The incident came from one database shared by Checkout, Inventory, and Payments. Open the audit to see the risks before changing anything.', action: 'Open topology audit', onAction: () => { onOpenAudit(); setBriefReviewed(true) } },
       { done: databaseReady, title: 'Give each service its own database', description: databaseReady ? 'Each service has an independent persistence connection.' : databaseCount < serviceCount ? `There are ${databaseCount} database${databaseCount === 1 ? '' : 's'} for ${serviceCount} services. Add ${Math.max(1, serviceCount - databaseCount)} more, connect each service to a different database, then remove the shared links.` : 'Database nodes are present, but at least two services still share one. Select a service and connect it to its own database.', action: databaseCount < serviceCount ? 'Add a database' : 'Select a service', onAction: () => databaseCount < serviceCount ? onAddNode('database') : onFocusNode('service') },
       { done: cacheReady, title: 'Route hot reads through a cache', description: cacheReady ? 'A connected cache now absorbs the hot-read load before it reaches the database.' : cacheNode ? 'A cache node exists. Connect Gateway → Cache and Cache → Checkout, then remove the old direct Gateway → Checkout connection.' : 'Add a Cache from the component strip. Then connect Gateway → Cache → Checkout so repeated reads avoid the database.', action: cacheNode ? 'Select the cache' : 'Add a cache', onAction: () => cacheNode ? onFocusNode('cache') : onAddNode('cache') },
@@ -475,29 +545,31 @@ function BeginnerGuide({ visible, moduleId, auditReady, audit, nodes, simulation
     ]
 
   const activeStep = steps.findIndex((step) => !step.done)
+  const guideEyebrow = pipelineMode ? 'PIPELINE CHALLENGE' : dataMode ? 'DISTRIBUTED DATA CHALLENGE' : agentMode ? 'HUMAN-OVERSIGHT CHALLENGE' : 'ARCHITECTURE CHALLENGE'
+  const guideTitle = pipelineMode ? 'Keep the buggy release out of production.' : dataMode ? 'Protect inventory correctness during failure.' : agentMode ? 'Make automated review accountable to a human.' : 'Make the checkout system survive a flash sale.'
 
   return (
     <section className="beginner-guide" aria-labelledby="beginner-guide-title">
       <div className="beginner-guide-header">
         <div className="beginner-guide-mark"><Sparkles size={15} /></div>
-        <div className="beginner-guide-title-wrap"><div><span className="beginner-guide-eyebrow">START HERE · {pipelineMode ? 'PIPELINE CHALLENGE' : 'BEGINNER WALKTHROUGH'}</span><button className="guide-help-link" onClick={onHelp}>What does this mean? <ArrowRight size={11} /></button></div><h2 id="beginner-guide-title">{pipelineMode ? 'Keep the buggy release out of production.' : 'Make the checkout system survive a flash sale.'}</h2><p><strong>Your goal:</strong> {moduleInfo[moduleId].objective}</p></div>
+        <div className="beginner-guide-title-wrap"><div><span className="beginner-guide-eyebrow">START HERE · {guideEyebrow}</span><button className="guide-help-link" onClick={onHelp}>What does this mean? <ArrowRight size={11} /></button></div><h2 id="beginner-guide-title">{guideTitle}</h2><p><strong>Your goal:</strong> {moduleInfo[moduleId].objective}</p></div>
         <button className="guide-dismiss" onClick={onDismiss}><X size={13} /><span>Hide guide</span></button>
       </div>
       <div className="beginner-guide-steps" aria-label="Challenge steps">
-        {steps.map((step, index) => <GuideStep key={`${moduleId}-${step.title}`} number={index + 1} active={!step.done && activeStep === index} done={step.done} title={step.title} description={step.description} action={step.action} onAction={step.onAction} />)}
+        {steps.map((step, index) => <GuideStep key={`${moduleId}-${step.title}`} number={index + 1} active={!step.done && activeStep === index} done={step.done} title={step.title} description={step.description} action={step.action} disabled={step.disabled} onAction={step.onAction} />)}
       </div>
-      {!auditReady && !pipelineMode ? <div className="guide-engine-note"><span className="guide-loading-dot" />Topology audit is connecting. Start with the briefing; live checks appear once the simulation engine is online.</div> : null}
+      {!auditReady && (moduleId === 'monolith' || dataMode) ? <div className="guide-engine-note"><span className="guide-loading-dot" />Topology audit is connecting. Start with the briefing; live checks appear once the simulation engine is online.</div> : null}
     </section>
   )
 }
 
-function GuideStep({ number, active, done, title, description, action, onAction }: { number: number; active: boolean; done: boolean; title: string; description: string; action: string; onAction: () => void }) {
+function GuideStep({ number, active, done, title, description, action, onAction, disabled = false }: { number: number; active: boolean; done: boolean; title: string; description: string; action: string; onAction: () => void; disabled?: boolean }) {
   return (
     <article className={`beginner-step${active ? ' is-current' : ''}${done ? ' is-done' : ''}`}>
       <div className="beginner-step-top"><span className="beginner-step-number">{done ? <Check size={13} /> : `0${number}`}</span><span className={`beginner-step-status${active ? ' current' : ''}`}>{done ? 'DONE' : active ? 'START HERE' : 'UP NEXT'}</span></div>
       <h3>{title}</h3>
       <p>{description}</p>
-      <button className="beginner-step-action" onClick={onAction}>{action}<ArrowRight size={12} /></button>
+      <button className="beginner-step-action" onClick={onAction} disabled={disabled}>{action}<ArrowRight size={12} /></button>
     </article>
   )
 }
